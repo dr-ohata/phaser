@@ -1,0 +1,263 @@
+// ==== CONFIGURAÇÃO DO JOGO ====
+var TILE_SIZE = 64;
+var GRID_WIDTH = 10;
+var GRID_HEIGHT = 8;
+
+var config = {
+    type: Phaser.AUTO,
+    width: GRID_WIDTH * TILE_SIZE,
+    height: GRID_HEIGHT * TILE_SIZE,
+    backgroundColor: '#222222',
+    scene: {
+        preload: preload,
+        create: create,
+        update: update
+    }
+};
+
+var game = new Phaser.Game(config);
+
+// ==== VARIÁVEIS GLOBAIS ====
+var grid;        // matriz com 0 (livre) e 1 (parede)
+var npc;         // nosso NPC
+var targetTile;  // posição do alvo na grade
+var path = [];   // caminho calculado pelo A*
+var currentStep = 0;
+
+// ==== PRELOAD ====
+function preload () {
+    // Não vamos carregar imagens externas, só gráficos gerados
+}
+
+// ==== CREATE ====
+function create () {
+    // 1) Define o mapa (0 = livre, 1 = parede)
+    grid = [
+        [0,0,0,0,0,0,0,0,0,0],
+        [0,1,1,1,0,0,0,0,0,0],
+        [0,0,0,1,0,0,0,1,1,0],
+        [0,0,0,1,0,0,0,0,1,0],
+        [0,0,0,1,1,1,0,0,1,0],
+        [0,0,0,0,0,0,0,0,1,0],
+        [0,0,0,0,0,0,0,0,1,0],
+        [0,0,0,0,0,0,0,0,0,0]
+    ];
+
+    // 2) Desenha a grade na tela
+    drawGrid.call(this);
+
+    // 3) Cria texturas simples para NPC e alvo
+    createSimpleTextures.call(this);
+
+    // 4) NPC começa na célula (0,0)
+    var startTile = { x: 0, y: 0 };
+    npc = this.add.sprite(
+        startTile.x * TILE_SIZE + TILE_SIZE / 2,
+        startTile.y * TILE_SIZE + TILE_SIZE / 2,
+        'npc'
+    );
+
+    // 5) Alvo na célula (9,7)
+    targetTile = { x: 9, y: 7 };
+    this.add.sprite(
+        targetTile.x * TILE_SIZE + TILE_SIZE / 2,
+        targetTile.y * TILE_SIZE + TILE_SIZE / 2,
+        'target'
+    );
+
+    // 6) Calcula o caminho com A*
+    path = findPath(startTile, targetTile, grid);
+    currentStep = 0;
+
+    // 7) Texto explicativo
+    this.add.text(10, 10, 'NPC usando A* para ir ate o alvo', {
+        fontSize: '18px',
+        fill: '#ffffff'
+    });
+
+    console.log("Caminho calculado:", path);
+}
+
+// ==== UPDATE ====
+function update (time, delta) {
+    if (!path || path.length === 0) return;
+    if (currentStep >= path.length) return;
+
+    var speed = 120; // pixels por segundo
+    var dt = delta / 1000; // delta em segundos
+
+    var targetNode = path[currentStep];
+    var targetX = targetNode.x * TILE_SIZE + TILE_SIZE / 2;
+    var targetY = targetNode.y * TILE_SIZE + TILE_SIZE / 2;
+
+    var dx = targetX - npc.x;
+    var dy = targetY - npc.y;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist < speed * dt) {
+        // Chegou nesse ponto, vai para o próximo
+        npc.x = targetX;
+        npc.y = targetY;
+        currentStep++;
+    } else {
+        // Move em direção ao ponto
+        npc.x += (dx / dist) * speed * dt;
+        npc.y += (dy / dist) * speed * dt;
+    }
+}
+
+// ==== DESENHA A GRADE ====
+function drawGrid() {
+    var graphics = this.add.graphics();
+
+    for (var y = 0; y < GRID_HEIGHT; y++) {
+        for (var x = 0; x < GRID_WIDTH; x++) {
+            var isWall = grid[y][x] === 1;
+            var color = isWall ? 0x883333 : 0x333333;
+
+            graphics.fillStyle(color, 1);
+            graphics.fillRect(
+                x * TILE_SIZE,
+                y * TILE_SIZE,
+                TILE_SIZE - 1,
+                TILE_SIZE - 1
+            );
+        }
+    }
+}
+
+// ==== CRIA TEXTURAS SIMPLES (NPC e ALVO) ====
+function createSimpleTextures() {
+    // NPC azul
+    var g1 = this.add.graphics();
+    g1.fillStyle(0x3399ff, 1);
+    g1.fillRect(0, 0, TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g1.generateTexture('npc', TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g1.destroy();
+
+    // Alvo amarelo
+    var g2 = this.add.graphics();
+    g2.fillStyle(0xffdd33, 1);
+    g2.fillRect(0, 0, TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g2.generateTexture('target', TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g2.destroy();
+}
+
+// ======================================================
+// =============== IMPLEMENTAÇÃO DO A* ==================
+// ======================================================
+
+// Estrutura auxiliar para criar uma chave única de cada nó
+function nodeKey(x, y) {
+    return x + ',' + y;
+}
+
+// Retorna vizinhos (4-direções) válidos
+function getNeighbors(node, grid) {
+    var neighbors = [];
+    var dirs = [
+        { x: 1, y: 0 },
+        { x: -1, y: 0 },
+        { x: 0, y: 1 },
+        { x: 0, y: -1 }
+    ];
+
+    for (var i = 0; i < dirs.length; i++) {
+        var nx = node.x + dirs[i].x;
+        var ny = node.y + dirs[i].y;
+
+        if (nx >= 0 && nx < GRID_WIDTH &&
+            ny >= 0 && ny < GRID_HEIGHT &&
+            grid[ny][nx] === 0) {
+            neighbors.push({ x: nx, y: ny });
+        }
+    }
+
+    return neighbors;
+}
+
+// Heurística: distância de Manhattan
+function heuristic(a, b) {
+    return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+}
+
+// Função principal do A*
+function findPath(start, goal, grid) {
+    var openList = [];
+    var cameFrom = {}; // para reconstruir o caminho
+    var gScore = {};
+    var fScore = {};
+    var closedSet = new Set();
+
+    var startKey = nodeKey(start.x, start.y);
+    gScore[startKey] = 0;
+    fScore[startKey] = heuristic(start, goal);
+
+    openList.push(start);
+
+    while (openList.length > 0) {
+        // 1) Pega o nó com menor fScore
+        var currentIndex = 0;
+        var current = openList[0];
+        for (var i = 1; i < openList.length; i++) {
+            var cKey = nodeKey(current.x, current.y);
+            var nKey = nodeKey(openList[i].x, openList[i].y);
+            if ((fScore[nKey] || Infinity) < (fScore[cKey] || Infinity)) {
+                current = openList[i];
+                currentIndex = i;
+            }
+        }
+
+        var currentKey = nodeKey(current.x, current.y);
+
+        // 2) Se chegou no objetivo, reconstrói o caminho
+        if (current.x === goal.x && current.y === goal.y) {
+            return reconstructPath(cameFrom, current);
+        }
+
+        // 3) Move de open para closed
+        openList.splice(currentIndex, 1);
+        closedSet.add(currentKey);
+
+        // 4) Explora vizinhos
+        var neighbors = getNeighbors(current, grid);
+        for (var n = 0; n < neighbors.length; n++) {
+            var neighbor = neighbors[n];
+            var nKey = nodeKey(neighbor.x, neighbor.y);
+
+            if (closedSet.has(nKey)) {
+                continue; // já visitado
+            }
+
+            var tentativeG = (gScore[currentKey] || Infinity) + 1;
+
+            if (!openList.some(function (v) { return v.x === neighbor.x && v.y === neighbor.y; })) {
+                openList.push(neighbor);
+            } else if (tentativeG >= (gScore[nKey] || Infinity)) {
+                continue; // não é melhor caminho
+            }
+
+            // Esse caminho é o melhor até agora
+            cameFrom[nKey] = current;
+            gScore[nKey] = tentativeG;
+            fScore[nKey] = tentativeG + heuristic(neighbor, goal);
+        }
+    }
+
+    // Se não encontrou caminho
+    return [];
+}
+
+// Reconstrói o caminho a partir de cameFrom
+function reconstructPath(cameFrom, current) {
+    var totalPath = [current];
+    var currentKey = nodeKey(current.x, current.y);
+
+    while (cameFrom[currentKey]) {
+        current = cameFrom[currentKey];
+        currentKey = nodeKey(current.x, current.y);
+        totalPath.unshift(current);
+    }
+
+    return totalPath;
+}
