@@ -1,0 +1,435 @@
+// ======= CONFIGURAÇÃO BÁSICA =======
+var TILE_SIZE = 64;
+var GRID_WIDTH = 10;
+var GRID_HEIGHT = 8;
+
+var config = {
+    type: Phaser.AUTO,
+    width: GRID_WIDTH * TILE_SIZE,
+    height: GRID_HEIGHT * TILE_SIZE,
+    backgroundColor: '#222222',
+    scene: {
+        preload: preload,
+        create: create,
+        update: update
+    }
+};
+
+var game = new Phaser.Game(config);
+
+// ======= VARIÁVEIS GLOBAIS =======
+var grid;
+var npc;
+var targetTile;
+var targetSprite;
+var path = [];
+var currentStep = 0;
+var gridGraphics;
+var currentMapIndex = 0;
+var maps = [];
+var levelText;
+var infoText;
+var reachedGoal = false;
+var lastTargetTile = null; // guarda o alvo anterior
+
+// ======= PRELOAD =======
+function preload() {}
+
+// ======= CREATE =======
+function create() {
+    // 1) Define 6 mapas diferentes (0 = livre, 1 = parede)
+    maps = [
+        // Mapa 1 – livre (sem paredes)
+        [
+            [0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0]
+        ],
+
+        // Mapa 2 – alguns obstáculos
+        [
+            [0,0,0,0,1,0,0,0,0,0],
+            [0,1,1,1,0,0,0,1,1,0],
+            [0,0,0,1,0,0,0,0,1,0],
+            [1,1,0,1,1,1,0,0,1,0],
+            [0,0,0,0,0,1,0,0,0,0],
+            [0,1,1,1,0,1,0,1,1,0],
+            [0,0,0,1,0,0,0,0,0,0],
+            [0,1,0,0,0,1,0,1,0,0]
+        ],
+
+        // Mapa 3 – tipo labirinto 1
+        [
+            [0,0,0,0,0,0,0,0,0,0],
+            [1,1,1,1,1,1,0,1,1,0],
+            [0,0,0,0,0,1,0,1,0,0],
+            [0,1,1,1,0,1,0,1,0,1],
+            [0,1,0,1,0,0,0,1,0,0],
+            [0,1,0,1,1,1,0,1,1,0],
+            [0,1,0,0,0,0,0,0,0,0],
+            [0,0,0,1,1,1,1,1,1,0]
+        ],
+
+        // Mapa 4 – tipo labirinto 2
+        [
+            [0,0,1,0,0,0,1,0,0,0],
+            [0,0,1,0,1,0,1,0,1,0],
+            [0,0,1,0,1,0,0,0,1,0],
+            [0,0,0,0,1,1,1,0,1,0],
+            [1,1,1,0,0,0,0,0,1,0],
+            [0,0,0,0,1,1,1,0,0,0],
+            [0,1,0,0,0,0,0,0,1,0],
+            [0,1,0,1,1,1,0,0,0,0]
+        ],
+
+        // Mapa 5 – corredor central
+        [
+            [0,0,0,0,0,0,0,0,0,0],
+            [0,1,1,1,1,1,1,1,1,0],
+            [0,1,0,0,0,0,0,0,1,0],
+            [0,1,0,1,1,1,1,0,1,0],
+            [0,1,0,0,0,0,1,0,1,0],
+            [0,1,1,1,1,0,1,0,1,0],
+            [0,0,0,0,1,0,0,0,1,0],
+            [0,1,1,0,1,1,1,1,1,0]
+        ],
+
+        // Mapa 6 – obstáculos espalhados
+        [
+            [0,0,0,1,0,0,0,0,0,0],
+            [0,1,0,1,0,1,1,1,1,0],
+            [0,1,0,0,0,0,0,0,1,0],
+            [0,1,1,1,1,1,1,0,1,0],
+            [0,0,0,0,0,0,1,0,0,0],
+            [1,1,1,1,1,0,1,1,1,0],
+            [0,0,0,0,1,0,0,0,0,0],
+            [0,1,1,0,0,0,1,1,1,0]
+        ]
+    ];
+
+    // 2) Cria texturas simples (NPC e alvo)
+    createSimpleTextures(this);
+
+    // 3) Textos na tela
+    levelText = this.add.text(10, 10, '', {
+        fontSize: '18px',
+        fill: '#ffffff'
+    });
+
+    infoText = this.add.text(
+        10,
+        34,
+        'NPC usa A*; a cada chegada, muda mapa e alvo (sempre em celula livre).',
+        { fontSize: '14px', fill: '#ffffff' }
+    );
+
+    // 4) Começa em um mapa aleatório
+    currentMapIndex = Phaser.Math.Between(0, maps.length - 1);
+    loadLevel(this, currentMapIndex);
+}
+
+// ======= UPDATE =======
+function update(time, delta) {
+    if (!path || path.length === 0) return;
+    if (reachedGoal) return;
+
+    if (currentStep >= path.length) {
+        reachedGoal = true;
+        changeMap(this);
+        return;
+    }
+
+    var speed = 120;
+    var dt = delta / 1000;
+
+    var targetNode = path[currentStep];
+    var targetX = targetNode.x * TILE_SIZE + TILE_SIZE / 2;
+    var targetY = targetNode.y * TILE_SIZE + TILE_SIZE / 2;
+
+    var dx = targetX - npc.x;
+    var dy = targetY - npc.y;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist < speed * dt) {
+        npc.x = targetX;
+        npc.y = targetY;
+        currentStep++;
+
+        if (currentStep >= path.length) {
+            reachedGoal = true;
+            changeMap(this);
+        }
+    } else {
+        npc.x += (dx / dist) * speed * dt;
+        npc.y += (dy / dist) * speed * dt;
+    }
+}
+
+// ======= CARREGA UM MAPA (NÍVEL) =======
+function loadLevel(scene, mapIndex) {
+    grid = maps[mapIndex];
+
+    if (gridGraphics) gridGraphics.destroy();
+    if (npc) npc.destroy();
+    if (targetSprite) targetSprite.destroy();
+
+    gridGraphics = drawGrid(scene);
+
+    // posição inicial fixa (0,0)
+    var startTile = { x: 0, y: 0 };
+
+    // escolhe alvo aleatório em célula livre (0), diferente do último alvo
+    targetTile = chooseRandomTarget(startTile);
+
+    // cria NPC
+    npc = scene.add.sprite(
+        startTile.x * TILE_SIZE + TILE_SIZE / 2,
+        startTile.y * TILE_SIZE + TILE_SIZE / 2,
+        'npc'
+    );
+
+    // cria alvo
+    targetSprite = scene.add.sprite(
+        targetTile.x * TILE_SIZE + TILE_SIZE / 2,
+        targetTile.y * TILE_SIZE + TILE_SIZE / 2,
+        'target'
+    );
+
+    // calcula caminho
+    path = findPath(startTile, targetTile, grid);
+
+    // se por algum motivo não houver caminho, tenta outros alvos algumas vezes
+    var attempts = 0;
+    while (path.length === 0 && attempts < 20) {
+        targetTile = chooseRandomTarget(startTile);
+        targetSprite.x = targetTile.x * TILE_SIZE + TILE_SIZE / 2;
+        targetSprite.y = targetTile.y * TILE_SIZE + TILE_SIZE / 2;
+        path = findPath(startTile, targetTile, grid);
+        attempts++;
+    }
+
+    currentStep = 0;
+    reachedGoal = false;
+
+    levelText.setText(
+        'Mapa atual: ' + (mapIndex + 1) +
+        ' | Alvo: (' + targetTile.x + ',' + targetTile.y + ')'
+    );
+
+    console.log(
+        'Mapa ' + (mapIndex + 1) +
+        ' – alvo em: ',
+        targetTile,
+        ' – caminho:',
+        path
+    );
+}
+
+// ======= TROCA PARA NOVO MAPA ALEATÓRIO =======
+function changeMap(scene) {
+    if (maps.length === 0) return;
+
+    var newIndex = currentMapIndex;
+    if (maps.length > 1) {
+        while (newIndex === currentMapIndex) {
+            newIndex = Math.floor(Math.random() * maps.length);
+        }
+    }
+
+    currentMapIndex = newIndex;
+    loadLevel(scene, currentMapIndex);
+}
+
+// ======= ESCOLHE ALVO ALEATÓRIO EM CÉLULA LIVRE =======
+function chooseRandomTarget(startTile) {
+    var freeCells = [];
+
+    for (var y = 0; y < GRID_HEIGHT; y++) {
+        for (var x = 0; x < GRID_WIDTH; x++) {
+            if (grid[y][x] !== 0) continue; // ignora paredes
+
+            // evita posição inicial
+            if (x === startTile.x && y === startTile.y) continue;
+
+            // evita repetir o último alvo (se existir)
+            if (lastTargetTile &&
+                x === lastTargetTile.x &&
+                y === lastTargetTile.y) continue;
+
+            freeCells.push({ x: x, y: y });
+        }
+    }
+
+    // se por acaso não sobrou nenhuma opção (caso extremo),
+    // relaxamos a restrição do último alvo e pegamos qualquer célula livre.
+    if (freeCells.length === 0) {
+        for (var yy = 0; yy < GRID_HEIGHT; yy++) {
+            for (var xx = 0; xx < GRID_WIDTH; xx++) {
+                if (grid[yy][xx] === 0 &&
+                    !(xx === startTile.x && yy === startTile.y)) {
+                    freeCells.push({ x: xx, y: yy });
+                }
+            }
+        }
+    }
+
+    var idx = Math.floor(Math.random() * freeCells.length);
+    var chosen = freeCells[idx];
+
+    lastTargetTile = { x: chosen.x, y: chosen.y };
+
+    return chosen;
+}
+
+// ======= DESENHA A GRADE =======
+function drawGrid(scene) {
+    var graphics = scene.add.graphics();
+
+    for (var y = 0; y < GRID_HEIGHT; y++) {
+        for (var x = 0; x < GRID_WIDTH; x++) {
+            var isWall = grid[y][x] === 1;
+            var color = isWall ? 0x883333 : 0x333333;
+
+            graphics.fillStyle(color, 1);
+            graphics.fillRect(
+                x * TILE_SIZE,
+                y * TILE_SIZE,
+                TILE_SIZE - 1,
+                TILE_SIZE - 1
+            );
+        }
+    }
+
+    return graphics;
+}
+
+// ======= CRIA TEXTURAS DO NPC E DO ALVO =======
+function createSimpleTextures(scene) {
+    var g1 = scene.add.graphics();
+    g1.fillStyle(0x3399ff, 1);
+    g1.fillRect(0, 0, TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g1.generateTexture('npc', TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g1.destroy();
+
+    var g2 = scene.add.graphics();
+    g2.fillStyle(0xffdd33, 1);
+    g2.fillRect(0, 0, TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g2.generateTexture('target', TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g2.destroy();
+}
+
+// ===============================
+// ======= A* PATHFINDING ========
+// ===============================
+function nodeKey(x, y) {
+    return x + ',' + y;
+}
+
+function getNeighbors(node, grid) {
+    var neighbors = [];
+    var dirs = [
+        { x: 1, y: 0 },
+        { x: -1, y: 0 },
+        { x: 0, y: 1 },
+        { x: 0, y: -1 }
+    ];
+
+    for (var i = 0; i < dirs.length; i++) {
+        var nx = node.x + dirs[i].x;
+        var ny = node.y + dirs[i].y;
+
+        if (
+            nx >= 0 && nx < GRID_WIDTH &&
+            ny >= 0 && ny < GRID_HEIGHT &&
+            grid[ny][nx] === 0
+        ) {
+            neighbors.push({ x: nx, y: ny });
+        }
+    }
+
+    return neighbors;
+}
+
+function heuristic(a, b) {
+    return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+}
+
+function findPath(start, goal, grid) {
+    var openList = [];
+    var cameFrom = {};
+    var gScore = {};
+    var fScore = {};
+    var closedSet = new Set();
+
+    var startKey = nodeKey(start.x, start.y);
+    gScore[startKey] = 0;
+    fScore[startKey] = heuristic(start, goal);
+
+    openList.push(start);
+
+    while (openList.length > 0) {
+        var currentIndex = 0;
+        var current = openList[0];
+        for (var i = 1; i < openList.length; i++) {
+            var cKey = nodeKey(current.x, current.y);
+            var nKey = nodeKey(openList[i].x, openList[i].y);
+            if ((fScore[nKey] || Infinity) < (fScore[cKey] || Infinity)) {
+                current = openList[i];
+                currentIndex = i;
+            }
+        }
+
+        var currentKey = nodeKey(current.x, current.y);
+
+        if (current.x === goal.x && current.y === goal.y) {
+            return reconstructPath(cameFrom, current);
+        }
+
+        openList.splice(currentIndex, 1);
+        closedSet.add(currentKey);
+
+        var neighbors = getNeighbors(current, grid);
+        for (var n = 0; n < neighbors.length; n++) {
+            var neighbor = neighbors[n];
+            var nKey = nodeKey(neighbor.x, neighbor.y);
+
+            if (closedSet.has(nKey)) continue;
+
+            var tentativeG = (gScore[currentKey] || Infinity) + 1;
+
+            var inOpen = openList.some(function(v) {
+                return v.x === neighbor.x && v.y === neighbor.y;
+            });
+
+            if (!inOpen) {
+                openList.push(neighbor);
+            } else if (tentativeG >= (gScore[nKey] || Infinity)) {
+                continue;
+            }
+
+            cameFrom[nKey] = current;
+            gScore[nKey] = tentativeG;
+            fScore[nKey] = tentativeG + heuristic(neighbor, goal);
+        }
+    }
+
+    return [];
+}
+
+function reconstructPath(cameFrom, current) {
+    var totalPath = [current];
+    var currentKey = nodeKey(current.x, current.y);
+
+    while (cameFrom[currentKey]) {
+        current = cameFrom[currentKey];
+        currentKey = nodeKey(current.x, current.y);
+        totalPath.unshift(current);
+    }
+
+    return totalPath;
+}
