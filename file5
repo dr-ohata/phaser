@@ -1,0 +1,411 @@
+// =============================
+// CONFIGURAÇÃO BÁSICA DO JOGO
+// =============================
+var TILE_SIZE = 48;
+var GRID_WIDTH = 12;
+var GRID_HEIGHT = 8;
+
+var config = {
+    type: Phaser.AUTO,
+    width: GRID_WIDTH * TILE_SIZE,
+    height: GRID_HEIGHT * TILE_SIZE,
+    backgroundColor: '#222222',
+    scene: {
+        preload: preload,
+        create: create,
+        update: update
+    }
+};
+
+var game = new Phaser.Game(config);
+
+// =============================
+// VARIÁVEIS GLOBAIS
+// =============================
+var grid;             // matriz com 0 (livre) e 1 (parede)
+var npc;              // "player" controlado pela IA
+var targetTile;       // coordenadas do alvo na grade
+var targetSprite;     // sprite do alvo
+var path = [];        // caminho calculado com A*
+var currentStep = 0;  // índice da célula atual do caminho
+var gridGraphics;     // camada de desenho do mapa
+var levelText;
+var infoText;
+var levelCounter = 0;
+
+// ---- FSM (Máquina de Estados Finitos) ----
+var NPC_STATE = {
+    GENERATING: 'GENERATING',
+    MOVING: 'MOVING',
+    WAITING: 'WAITING'
+};
+
+var npcState = NPC_STATE.GENERATING;
+var waitTimer = 0; // usado no estado WAITING
+
+// =============================
+// CENA: PRELOAD
+// =============================
+function preload() {
+    // sem assets externos
+}
+
+// =============================
+// CENA: CREATE
+// =============================
+function create() {
+    // cria sprites básicos (retângulo azul e amarelo)
+    createSimpleTextures(this);
+
+    // textos
+    levelText = this.add.text(10, 10, '', {
+        fontSize: '18px',
+        fill: '#ffffff'
+    });
+
+    infoText = this.add.text(10, 32,
+        'Mapa, jogador e alvo gerados proceduralmente. NPC usa A* + FSM.',
+        { fontSize: '14px', fill: '#ffffff' }
+    );
+
+    // primeiro estado: gerar mapa
+    npcState = NPC_STATE.GENERATING;
+}
+
+// =============================
+// CENA: UPDATE (FSM aqui!)
+// =============================
+function update(time, delta) {
+    var dt = delta / 1000;
+
+    switch (npcState) {
+        case NPC_STATE.GENERATING:
+            // Gera um novo nível procedural (mapa + start + goal + path)
+            generateNewLevel(this);
+            npcState = NPC_STATE.MOVING;
+            break;
+
+        case NPC_STATE.MOVING:
+            if (!path || path.length === 0) {
+                // se algo deu errado, vai para WAITING e depois regenerar
+                npcState = NPC_STATE.WAITING;
+                waitTimer = 0.5;
+                return;
+            }
+
+            if (currentStep >= path.length) {
+                // chegou ao fim do caminho → espera e depois gera novo mapa
+                npcState = NPC_STATE.WAITING;
+                waitTimer = 0.5;
+                return;
+            }
+
+            // lógica de movimento ao longo do caminho
+            var speed = 120;
+            var targetNode = path[currentStep];
+            var targetX = targetNode.x * TILE_SIZE + TILE_SIZE / 2;
+            var targetY = targetNode.y * TILE_SIZE + TILE_SIZE / 2;
+
+            var dx = targetX - npc.x;
+            var dy = targetY - npc.y;
+            var dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (dist < speed * dt) {
+                npc.x = targetX;
+                npc.y = targetY;
+                currentStep++;
+
+                if (currentStep >= path.length) {
+                    npcState = NPC_STATE.WAITING;
+                    waitTimer = 0.5;
+                }
+            } else {
+                npc.x += (dx / dist) * speed * dt;
+                npc.y += (dy / dist) * speed * dt;
+            }
+
+            break;
+
+        case NPC_STATE.WAITING:
+            waitTimer -= dt;
+            if (waitTimer <= 0) {
+                npcState = NPC_STATE.GENERATING;
+            }
+            break;
+    }
+}
+
+// =============================
+// GERAÇÃO PROCEDURAL DO NÍVEL
+// =============================
+function generateNewLevel(scene) {
+    var maxAttempts = 30;
+    var attempts = 0;
+
+    var startTile = null;
+    var endTile = null;
+    var newGrid = null;
+    var newPath = [];
+
+    // tenta gerar mapa + start + goal com caminho válido
+    do {
+        newGrid = generateRandomGrid(0.25); // 25% de paredes
+        startTile = pickRandomFreeCell(newGrid, []);
+        endTile   = pickRandomFreeCell(newGrid, [startTile]);
+
+        newPath = findPath(startTile, endTile, newGrid);
+        attempts++;
+    } while (newPath.length === 0 && attempts < maxAttempts);
+
+    // fallback: se não achar nada, usa mapa totalmente vazio
+    if (newPath.length === 0) {
+        newGrid = generateRandomGrid(0); // sem paredes
+        startTile = { x: 0, y: 0 };
+        endTile   = { x: GRID_WIDTH - 1, y: GRID_HEIGHT - 1 };
+        newPath = findPath(startTile, endTile, newGrid);
+    }
+
+    grid = newGrid;
+    targetTile = endTile;
+    path = newPath;
+    currentStep = 0;
+    levelCounter++;
+
+    // destrói o que havia antes
+    if (gridGraphics) gridGraphics.destroy();
+    if (npc) npc.destroy();
+    if (targetSprite) targetSprite.destroy();
+
+    // desenha o mapa atual
+    gridGraphics = drawGrid(scene);
+
+    // cria NPC na posição inicial
+    npc = scene.add.sprite(
+        startTile.x * TILE_SIZE + TILE_SIZE / 2,
+        startTile.y * TILE_SIZE + TILE_SIZE / 2,
+        'npc'
+    );
+
+    // cria alvo na posição final
+    targetSprite = scene.add.sprite(
+        targetTile.x * TILE_SIZE + TILE_SIZE / 2,
+        targetTile.y * TILE_SIZE + TILE_SIZE / 2,
+        'target'
+    );
+
+    levelText.setText(
+        'Nivel: ' + levelCounter +
+        ' | Start: (' + startTile.x + ',' + startTile.y + ')' +
+        ' | Goal: (' + targetTile.x + ',' + targetTile.y + ')'
+    );
+
+    console.log('Novo nível', {
+        nivel: levelCounter,
+        start: startTile,
+        goal: targetTile,
+        path: path
+    });
+}
+
+// =============================
+// GERAÇÃO DO MAPA RANDOM
+// =============================
+
+// Gera uma grade aleatória com certa densidade de paredes
+function generateRandomGrid(wallDensity) {
+    var g = [];
+    for (var y = 0; y < GRID_HEIGHT; y++) {
+        g[y] = [];
+        for (var x = 0; x < GRID_WIDTH; x++) {
+            var isWall = Math.random() < wallDensity;
+            g[y][x] = isWall ? 1 : 0;
+        }
+    }
+    return g;
+}
+
+// Escolhe uma célula livre, evitando as "forbiddenCells"
+function pickRandomFreeCell(grid, forbiddenCells) {
+    var freeCells = [];
+
+    for (var y = 0; y < GRID_HEIGHT; y++) {
+        for (var x = 0; x < GRID_WIDTH; x++) {
+            if (grid[y][x] !== 0) continue; // não é livre
+
+            var forbidden = false;
+            for (var i = 0; i < forbiddenCells.length; i++) {
+                if (forbiddenCells[i].x === x && forbiddenCells[i].y === y) {
+                    forbidden = true;
+                    break;
+                }
+            }
+            if (!forbidden) {
+                freeCells.push({ x: x, y: y });
+            }
+        }
+    }
+
+    // se não houver nenhuma célula livre, força (0,0)
+    if (freeCells.length === 0) {
+        return { x: 0, y: 0 };
+    }
+
+    var idx = Math.floor(Math.random() * freeCells.length);
+    return freeCells[idx];
+}
+
+// =============================
+// DESENHO DA GRADE
+// =============================
+function drawGrid(scene) {
+    var graphics = scene.add.graphics();
+
+    for (var y = 0; y < GRID_HEIGHT; y++) {
+        for (var x = 0; x < GRID_WIDTH; x++) {
+            var isWall = grid[y][x] === 1;
+            var color = isWall ? 0x883333 : 0x333333;
+
+            graphics.fillStyle(color, 1);
+            graphics.fillRect(
+                x * TILE_SIZE,
+                y * TILE_SIZE,
+                TILE_SIZE - 1,
+                TILE_SIZE - 1
+            );
+        }
+    }
+
+    return graphics;
+}
+
+// =============================
+// SPRITES SIMPLES (NPC / ALVO)
+// =============================
+function createSimpleTextures(scene) {
+    // NPC azul
+    var g1 = scene.add.graphics();
+    g1.fillStyle(0x3399ff, 1);
+    g1.fillRect(0, 0, TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g1.generateTexture('npc', TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g1.destroy();
+
+    // Alvo amarelo
+    var g2 = scene.add.graphics();
+    g2.fillStyle(0xffdd33, 1);
+    g2.fillRect(0, 0, TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g2.generateTexture('target', TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g2.destroy();
+}
+
+// =============================
+// A* PATHFINDING
+// =============================
+function nodeKey(x, y) {
+    return x + ',' + y;
+}
+
+function getNeighbors(node, grid) {
+    var neighbors = [];
+    var dirs = [
+        { x: 1, y: 0 },
+        { x: -1, y: 0 },
+        { x: 0, y: 1 },
+        { x: 0, y: -1 }
+    ];
+
+    for (var i = 0; i < dirs.length; i++) {
+        var nx = node.x + dirs[i].x;
+        var ny = node.y + dirs[i].y;
+
+        if (
+            nx >= 0 && nx < GRID_WIDTH &&
+            ny >= 0 && ny < GRID_HEIGHT &&
+            grid[ny][nx] === 0
+        ) {
+            neighbors.push({ x: nx, y: ny });
+        }
+    }
+
+    return neighbors;
+}
+
+// Heurística: distância de Manhattan
+function heuristic(a, b) {
+    return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+}
+
+// Função principal do A*
+function findPath(start, goal, grid) {
+    var openList = [];
+    var cameFrom = {};
+    var gScore = {};
+    var fScore = {};
+    var closedSet = new Set();
+
+    var startKey = nodeKey(start.x, start.y);
+    gScore[startKey] = 0;
+    fScore[startKey] = heuristic(start, goal);
+
+    openList.push(start);
+
+    while (openList.length > 0) {
+        var currentIndex = 0;
+        var current = openList[0];
+        for (var i = 1; i < openList.length; i++) {
+            var cKey = nodeKey(current.x, current.y);
+            var nKey = nodeKey(openList[i].x, openList[i].y);
+            if ((fScore[nKey] || Infinity) < (fScore[cKey] || Infinity)) {
+                current = openList[i];
+                currentIndex = i;
+            }
+        }
+
+        var currentKey = nodeKey(current.x, current.y);
+
+        if (current.x === goal.x && current.y === goal.y) {
+            return reconstructPath(cameFrom, current);
+        }
+
+        openList.splice(currentIndex, 1);
+        closedSet.add(currentKey);
+
+        var neighbors = getNeighbors(current, grid);
+        for (var n = 0; n < neighbors.length; n++) {
+            var neighbor = neighbors[n];
+            var nKey = nodeKey(neighbor.x, neighbor.y);
+
+            if (closedSet.has(nKey)) continue;
+
+            var tentativeG = (gScore[currentKey] || Infinity) + 1;
+
+            var inOpen = openList.some(function (v) {
+                return v.x === neighbor.x && v.y === neighbor.y;
+            });
+
+            if (!inOpen) {
+                openList.push(neighbor);
+            } else if (tentativeG >= (gScore[nKey] || Infinity)) {
+                continue;
+            }
+
+            cameFrom[nKey] = current;
+            gScore[nKey] = tentativeG;
+            fScore[nKey] = tentativeG + heuristic(neighbor, goal);
+        }
+    }
+
+    return [];
+}
+
+function reconstructPath(cameFrom, current) {
+    var totalPath = [current];
+    var currentKey = nodeKey(current.x, current.y);
+
+    while (cameFrom[currentKey]) {
+        current = cameFrom[currentKey];
+        currentKey = nodeKey(current.x, current.y);
+        totalPath.unshift(current);
+    }
+
+    return totalPath;
+}
