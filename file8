@@ -1,0 +1,581 @@
+// =============================
+// CONFIGURAÇÃO BÁSICA DO JOGO
+// =============================
+var TILE_SIZE = 48;
+var GRID_WIDTH = 12;
+var GRID_HEIGHT = 8;
+
+var config = {
+    type: Phaser.AUTO,
+    width: GRID_WIDTH * TILE_SIZE,
+    height: GRID_HEIGHT * TILE_SIZE,
+    backgroundColor: '#222222',
+    scene: {
+        preload: preload,
+        create: create,
+        update: update
+    }
+};
+
+var game = new Phaser.Game(config);
+
+// =============================
+// VARIÁVEIS GLOBAIS
+// =============================
+var grid;             // matriz com 0 (livre) e 1 (parede)
+
+// NPC1: "jogador" controlado pela IA (A* até o alvo)
+var npc;
+var targetTile;
+var targetSprite;
+var path = [];
+var currentStep = 0;
+
+// NPC2: inimigo com FSM própria
+var enemyNpc;
+var enemyState;
+var enemyPath = [];
+var enemyStep = 0;
+var enemyWanderTarget = null;
+
+// gráficos
+var gridGraphics;
+var levelText;
+var infoText;
+var levelCounter = 0;
+
+// ---- FSM (Máquina de Estados Finitos) do NPC1 ----
+var NPC_STATE = {
+    GENERATING: 'GENERATING',
+    MOVING: 'MOVING',
+    WAITING: 'WAITING'
+};
+var npcState = NPC_STATE.GENERATING;
+var waitTimer = 0;
+
+// ---- FSM do NPC2 (inimigo) ----
+var ENEMY_STATE = {
+    WANDER: 'WANDER',
+    CHASE: 'CHASE'
+};
+
+// parâmetros de colisão
+var ENEMY_COLLIDE_RADIUS = TILE_SIZE * 0.5; // distância para considerar "pegou"
+
+// velocidades do inimigo
+var ENEMY_SPEED_WANDER = 90;
+var ENEMY_SPEED_CHASE  = 150; // mais rápido quando persegue
+
+// =============================
+// CENA: PRELOAD
+// =============================
+function preload() {}
+
+// =============================
+// CENA: CREATE
+// =============================
+function create() {
+    createSimpleTextures(this);
+
+    levelText = this.add.text(10, 10, '', {
+        fontSize: '18px',
+        fill: '#ffffff'
+    });
+
+    infoText = this.add.text(
+        10,
+        32,
+        'NPC azul: A* ate o alvo (FSM). NPC vermelho: FSM (WANDER/CHASE, raio 3 tiles).',
+        { fontSize: '14px', fill: '#ffffff' }
+    );
+
+    npcState = NPC_STATE.GENERATING;
+}
+
+// =============================
+// CENA: UPDATE
+// =============================
+function update(time, delta) {
+    var dt = delta / 1000;
+
+    // FSM do NPC1 (azul)
+    switch (npcState) {
+        case NPC_STATE.GENERATING:
+            generateNewLevel(this);
+            npcState = NPC_STATE.MOVING;
+            break;
+
+        case NPC_STATE.MOVING:
+            updateNpcMovement(dt);
+            break;
+
+        case NPC_STATE.WAITING:
+            waitTimer -= dt;
+            if (waitTimer <= 0) {
+                npcState = NPC_STATE.GENERATING;
+            }
+            break;
+    }
+
+    // FSM do NPC2 (vermelho)
+    if (enemyNpc) {
+        updateEnemyFSM(dt, this);
+    }
+
+    // Verifica colisão entre inimigo e NPC1
+    if (enemyNpc && npc) {
+        var dx = enemyNpc.x - npc.x;
+        var dy = enemyNpc.y - npc.y;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < ENEMY_COLLIDE_RADIUS) {
+            console.log('O inimigo pegou o NPC! Reiniciando fase...');
+            npcState = NPC_STATE.GENERATING;
+        }
+    }
+}
+
+// =============================
+// MOVIMENTO DO NPC1 (AZUL)
+// =============================
+function updateNpcMovement(dt) {
+    if (!path || path.length === 0) {
+        npcState = NPC_STATE.WAITING;
+        waitTimer = 0.5;
+        return;
+    }
+
+    if (currentStep >= path.length) {
+        npcState = NPC_STATE.WAITING;
+        waitTimer = 0.5;
+        return;
+    }
+
+    var speed = 120;
+    var targetNode = path[currentStep];
+    var targetX = targetNode.x * TILE_SIZE + TILE_SIZE / 2;
+    var targetY = targetNode.y * TILE_SIZE + TILE_SIZE / 2;
+
+    var dx = targetX - npc.x;
+    var dy = targetY - npc.y;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist < speed * dt) {
+        npc.x = targetX;
+        npc.y = targetY;
+        currentStep++;
+
+        if (currentStep >= path.length) {
+            npcState = NPC_STATE.WAITING;
+            waitTimer = 0.5;
+        }
+    } else {
+        npc.x += (dx / dist) * speed * dt;
+        npc.y += (dy / dist) * speed * dt;
+    }
+}
+
+// =============================
+// FSM DO INIMIGO (NPC2 VERMELHO)
+// =============================
+function updateEnemyFSM(dt, scene) {
+    // --- DETECÇÃO EM 3 CASAS HORIZONTAIS/VERTICAIS ---
+    if (npc) {
+        var enemyTile = worldToTile(enemyNpc.x, enemyNpc.y);
+        var npcTile   = worldToTile(npc.x, npc.y);
+
+        var dxTiles = npcTile.x - enemyTile.x;
+        var dyTiles = npcTile.y - enemyTile.y;
+
+        var inSameRow    = (enemyTile.y === npcTile.y) && (Math.abs(dxTiles) <= 3);
+        var inSameColumn = (enemyTile.x === npcTile.x) && (Math.abs(dyTiles) <= 3);
+
+        if ((inSameRow || inSameColumn) && enemyState !== ENEMY_STATE.CHASE) {
+            // NPC azul entrou em "linha de visão" em 3 casas → CHASE
+            enemyState = ENEMY_STATE.CHASE;
+            enemyPath = [];
+            enemyStep = 0;
+        }
+    }
+
+    switch (enemyState) {
+        case ENEMY_STATE.WANDER:
+            updateEnemyWander(dt, scene);
+            break;
+
+        case ENEMY_STATE.CHASE:
+            updateEnemyChase(dt, scene);
+            break;
+    }
+}
+
+// --- Estado WANDER: anda aleatoriamente pelo mapa usando A* ---
+function updateEnemyWander(dt, scene) {
+    if (!enemyPath || enemyPath.length === 0 || enemyStep >= enemyPath.length) {
+        var currentTile = worldToTile(enemyNpc.x, enemyNpc.y);
+        enemyWanderTarget = pickRandomFreeCell(grid, [currentTile]);
+
+        enemyPath = findPath(currentTile, enemyWanderTarget, grid);
+        enemyStep = 0;
+
+        if (enemyPath.length === 0) {
+            return;
+        }
+    }
+
+    moveEnemyAlongPath(dt);
+}
+
+// --- Estado CHASE: persegue o NPC1 com A* e velocidade maior ---
+function updateEnemyChase(dt, scene) {
+    if (!npc) {
+        enemyState = ENEMY_STATE.WANDER;
+        enemyWanderTarget = null;
+        enemyPath = [];
+        enemyStep = 0;
+        return;
+    }
+
+    // Se não temos caminho ou já chegamos ao fim, recalcula A* até o NPC azul
+    if (!enemyPath || enemyPath.length === 0 || enemyStep >= enemyPath.length) {
+        var enemyTile = worldToTile(enemyNpc.x, enemyNpc.y);
+        var npcTile   = worldToTile(npc.x, npc.y);
+
+        enemyPath = findPath(enemyTile, npcTile, grid);
+        enemyStep = 0;
+
+        if (enemyPath.length === 0) {
+            enemyState = ENEMY_STATE.WANDER;
+            enemyWanderTarget = null;
+            return;
+        }
+    }
+
+    moveEnemyAlongPath(dt);
+}
+
+// Movimento do inimigo ao longo de enemyPath
+function moveEnemyAlongPath(dt) {
+    if (!enemyPath || enemyPath.length === 0 || enemyStep >= enemyPath.length) {
+        return;
+    }
+
+    // velocidade depende do estado
+    var speed =
+        enemyState === ENEMY_STATE.CHASE
+            ? ENEMY_SPEED_CHASE
+            : ENEMY_SPEED_WANDER;
+
+    var targetNode = enemyPath[enemyStep];
+    var targetX = targetNode.x * TILE_SIZE + TILE_SIZE / 2;
+    var targetY = targetNode.y * TILE_SIZE + TILE_SIZE / 2;
+
+    var dx = targetX - enemyNpc.x;
+    var dy = targetY - enemyNpc.y;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist < speed * dt) {
+        enemyNpc.x = targetX;
+        enemyNpc.y = targetY;
+        enemyStep++;
+    } else {
+        enemyNpc.x += (dx / dist) * speed * dt;
+        enemyNpc.y += (dy / dist) * speed * dt;
+    }
+}
+
+// =============================
+// GERAÇÃO PROCEDURAL DO NÍVEL
+// =============================
+function generateNewLevel(scene) {
+    var maxAttempts = 30;
+    var attempts = 0;
+
+    var startTile = null;
+    var endTile = null;
+    var enemyStartTile = null;
+    var newGrid = null;
+    var newPath = [];
+
+    do {
+        newGrid = generateRandomGrid(0.25); // 25% de paredes
+        startTile = pickRandomFreeCell(newGrid, []);
+        endTile   = pickRandomFreeCell(newGrid, [startTile]);
+        enemyStartTile = pickRandomFreeCell(newGrid, [startTile, endTile]);
+
+        newPath = findPath(startTile, endTile, newGrid);
+        attempts++;
+    } while (newPath.length === 0 && attempts < maxAttempts);
+
+    if (newPath.length === 0) {
+        newGrid = generateRandomGrid(0);
+        startTile = { x: 0, y: 0 };
+        endTile   = { x: GRID_WIDTH - 1, y: GRID_HEIGHT - 1 };
+        enemyStartTile = { x: Math.floor(GRID_WIDTH / 2), y: Math.floor(GRID_HEIGHT / 2) };
+        newPath = findPath(startTile, endTile, newGrid);
+    }
+
+    grid = newGrid;
+    targetTile = endTile;
+    path = newPath;
+    currentStep = 0;
+    levelCounter++;
+
+    if (gridGraphics) gridGraphics.destroy();
+    if (npc) npc.destroy();
+    if (targetSprite) targetSprite.destroy();
+    if (enemyNpc) enemyNpc.destroy();
+
+    gridGraphics = drawGrid(scene);
+
+    npc = scene.add.sprite(
+        startTile.x * TILE_SIZE + TILE_SIZE / 2,
+        startTile.y * TILE_SIZE + TILE_SIZE / 2,
+        'npc'
+    );
+
+    targetSprite = scene.add.sprite(
+        targetTile.x * TILE_SIZE + TILE_SIZE / 2,
+        targetTile.y * TILE_SIZE + TILE_SIZE / 2,
+        'target'
+    );
+
+    enemyNpc = scene.add.sprite(
+        enemyStartTile.x * TILE_SIZE + TILE_SIZE / 2,
+        enemyStartTile.y * TILE_SIZE + TILE_SIZE / 2,
+        'enemy'
+    );
+
+    enemyState = ENEMY_STATE.WANDER;
+    enemyPath = [];
+    enemyStep = 0;
+    enemyWanderTarget = null;
+
+    levelText.setText(
+        'Nivel: ' + levelCounter +
+        ' | Start: (' + startTile.x + ',' + startTile.y + ')' +
+        ' | Goal: (' + targetTile.x + ',' + targetTile.y + ')'
+    );
+
+    console.log('Novo nivel', {
+        nivel: levelCounter,
+        start: startTile,
+        goal: targetTile,
+        enemyStart: enemyStartTile,
+        path: path
+    });
+}
+
+// =============================
+// GERAÇÃO DO MAPA RANDOM
+// =============================
+function generateRandomGrid(wallDensity) {
+    var g = [];
+    for (var y = 0; y < GRID_HEIGHT; y++) {
+        g[y] = [];
+        for (var x = 0; x < GRID_WIDTH; x++) {
+            var isWall = Math.random() < wallDensity;
+            g[y][x] = isWall ? 1 : 0;
+        }
+    }
+    return g;
+}
+
+function pickRandomFreeCell(grid, forbiddenCells) {
+    var freeCells = [];
+
+    for (var y = 0; y < GRID_HEIGHT; y++) {
+        for (var x = 0; x < GRID_WIDTH; x++) {
+            if (grid[y][x] !== 0) continue;
+
+            var forbidden = false;
+            for (var i = 0; i < forbiddenCells.length; i++) {
+                if (forbiddenCells[i].x === x && forbiddenCells[i].y === y) {
+                    forbidden = true;
+                    break;
+                }
+            }
+            if (!forbidden) {
+                freeCells.push({ x: x, y: y });
+            }
+        }
+    }
+
+    if (freeCells.length === 0) {
+        return { x: 0, y: 0 };
+    }
+
+    var idx = Math.floor(Math.random() * freeCells.length);
+    return freeCells[idx];
+}
+
+// =============================
+// DESENHO DA GRADE
+// =============================
+function drawGrid(scene) {
+    var graphics = scene.add.graphics();
+
+    for (var y = 0; y < GRID_HEIGHT; y++) {
+        for (var x = 0; x < GRID_WIDTH; x++) {
+            var isWall = grid[y][x] === 1;
+            var color = isWall ? 0x883333 : 0x333333;
+
+            graphics.fillStyle(color, 1);
+            graphics.fillRect(
+                x * TILE_SIZE,
+                y * TILE_SIZE,
+                TILE_SIZE - 1,
+                TILE_SIZE - 1
+            );
+        }
+    }
+
+    return graphics;
+}
+
+// =============================
+// SPRITES SIMPLES
+// =============================
+function createSimpleTextures(scene) {
+    // NPC azul
+    var g1 = scene.add.graphics();
+    g1.fillStyle(0x3399ff, 1);
+    g1.fillRect(0, 0, TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g1.generateTexture('npc', TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g1.destroy();
+
+    // Alvo amarelo
+    var g2 = scene.add.graphics();
+    g2.fillStyle(0xffdd33, 1);
+    g2.fillRect(0, 0, TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g2.generateTexture('target', TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g2.destroy();
+
+    // Inimigo vermelho
+    var g3 = scene.add.graphics();
+    g3.fillStyle(0xff3333, 1);
+    g3.fillRect(0, 0, TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g3.generateTexture('enemy', TILE_SIZE * 0.8, TILE_SIZE * 0.8);
+    g3.destroy();
+}
+
+// =============================
+// A* PATHFINDING
+// =============================
+function nodeKey(x, y) {
+    return x + ',' + y;
+}
+
+function getNeighbors(node, grid) {
+    var neighbors = [];
+    var dirs = [
+        { x: 1, y: 0 },
+        { x: -1, y: 0 },
+        { x: 0, y: 1 },
+        { x: 0, y: -1 }
+    ];
+
+    for (var i = 0; i < dirs.length; i++) {
+        var nx = node.x + dirs[i].x;
+        var ny = node.y + dirs[i].y;
+
+        if (
+            nx >= 0 && nx < GRID_WIDTH &&
+            ny >= 0 && ny < GRID_HEIGHT &&
+            grid[ny][nx] === 0
+        ) {
+            neighbors.push({ x: nx, y: ny });
+        }
+    }
+
+    return neighbors;
+}
+
+function heuristic(a, b) {
+    return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+}
+
+function findPath(start, goal, grid) {
+    var openList = [];
+    var cameFrom = {};
+    var gScore = {};
+    var fScore = {};
+    var closedSet = new Set();
+
+    var startKey = nodeKey(start.x, start.y);
+    gScore[startKey] = 0;
+    fScore[startKey] = heuristic(start, goal);
+
+    openList.push(start);
+
+    while (openList.length > 0) {
+        var currentIndex = 0;
+        var current = openList[0];
+        for (var i = 1; i < openList.length; i++) {
+            var cKey = nodeKey(current.x, current.y);
+            var nKey = nodeKey(openList[i].x, openList[i].y);
+            if ((fScore[nKey] || Infinity) < (fScore[cKey] || Infinity)) {
+                current = openList[i];
+                currentIndex = i;
+            }
+        }
+
+        var currentKey = nodeKey(current.x, current.y);
+
+        if (current.x === goal.x && current.y === goal.y) {
+            return reconstructPath(cameFrom, current);
+        }
+
+        openList.splice(currentIndex, 1);
+        closedSet.add(currentKey);
+
+        var neighbors = getNeighbors(current, grid);
+        for (var n = 0; n < neighbors.length; n++) {
+            var neighbor = neighbors[n];
+            var nKey = nodeKey(neighbor.x, neighbor.y);
+
+            if (closedSet.has(nKey)) continue;
+
+            var tentativeG = (gScore[currentKey] || Infinity) + 1;
+
+            var inOpen = openList.some(function (v) {
+                return v.x === neighbor.x && v.y === neighbor.y;
+            });
+
+            if (!inOpen) {
+                openList.push(neighbor);
+            } else if (tentativeG >= (gScore[nKey] || Infinity)) {
+                continue;
+            }
+
+            cameFrom[nKey] = current;
+            gScore[nKey] = tentativeG;
+            fScore[nKey] = tentativeG + heuristic(neighbor, goal);
+        }
+    }
+
+    return [];
+}
+
+function reconstructPath(cameFrom, current) {
+    var totalPath = [current];
+    var currentKey = nodeKey(current.x, current.y);
+
+    while (cameFrom[currentKey]) {
+        current = cameFrom[currentKey];
+        currentKey = nodeKey(current.x, current.y);
+        totalPath.unshift(current);
+    }
+
+    return totalPath;
+}
+
+// =============================
+// UTIL: Conversão mundo <-> grid
+// =============================
+function worldToTile(x, y) {
+    return {
+        x: Math.floor(x / TILE_SIZE),
+        y: Math.floor(y / TILE_SIZE)
+    };
+}
